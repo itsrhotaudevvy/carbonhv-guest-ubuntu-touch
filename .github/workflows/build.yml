@@ -60,7 +60,10 @@ jobs:
       - name: Install cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu cpio
+          # libc6-dev-arm64-cross carries the target's headers; gcc-aarch64-linux-gnu alone gives
+          # you a compiler that cannot find bits/wordsize.h.
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross cpio
       - name: Build the CVD1 initramfs
         run: ci/initramfs.sh out
       - uses: actions/upload-artifact@v4

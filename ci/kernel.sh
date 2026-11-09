@@ -9,8 +9,11 @@
 # near-native plan exits 5 from that check and is recorded as such instead of being called verified.
 set -euo pipefail
 
-version="${1:?usage: kernel.sh <kernel-version> <out-dir>}"
-out="${2:?usage: kernel.sh <kernel-version> <out-dir>}"
+version="${1:?usage: kernel.sh <kernel-version> <out-dir> [family]}"
+out="${2:?usage: kernel.sh <kernel-version> <out-dir> [family]}"
+# The contract differs by family: Android requires SELinux in the image, Ubuntu Touch requires
+# AppArmor. Checking a Ubuntu Touch kernel against the Android list fails for the wrong reason.
+family="${3:-ubuntu-touch}"
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../carbonhv" && pwd)"
 
@@ -75,7 +78,7 @@ make -C "$src" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig >/dev/nu
 
 echo "kernel: checking the CVD1 kernel contract with carbonctl"
 set +e
-"$carbonctl" guest kernel-config android "$src/.config" "${fragments[@]}" >"$work/contract.txt" 2>&1
+"$carbonctl" guest kernel-config "$family" "$src/.config" "${fragments[@]}" >"$work/contract.txt" 2>&1
 contract=$?
 set -e
 cat "$work/contract.txt"

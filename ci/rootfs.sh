@@ -8,10 +8,11 @@
 # the runner's own filesystem.
 set -euo pipefail
 
-url="${1:?usage: rootfs.sh <url> <sha256> <size_mib> <out-dir>}"
-expected="${2:?usage: rootfs.sh <url> <sha256> <size_mib> <out-dir>}"
-size_mib="${3:?usage: rootfs.sh <url> <sha256> <size_mib> <out-dir>}"
-out="${4:?usage: rootfs.sh <url> <sha256> <size_mib> <out-dir>}"
+url="${1:-}"
+expected="${2:-}"
+size_mib="${3:-16384}"
+out="${4:-out}"
+[[ -n "$size_mib" && -n "$out" ]] || { echo "usage: rootfs.sh <url> <sha256> <size_mib> <out-dir>" >&2; exit 64; }
 
 [[ -n "$url" && -n "$expected" ]] || {
   echo "rootfs: no pinned rootfs. Set the repository variables CARBONHV_UT_ROOTFS_URL and" >&2
