@@ -1,0 +1,173 @@
+name: Build the Ubuntu Touch CVD1 guest
+
+# Three inputs, then CarbonHV's own assembly recipe:
+#   kernel    - ARM64 near-native kernel, contract-checked by `carbonctl guest kernel-config`
+#   initramfs - a statically linked CVD1 init, no busybox
+#   rootfs    - the pinned UBports rootfs as an ext4 image (needs the two repository variables)
+#
+# guest/ubuntu-touch/build.sh from CarbonHV is what assembles and validates the bundle; this
+# workflow only produces its inputs and publishes the result with provenance.
+
+on:
+  workflow_dispatch:
+    inputs:
+      carbonhv_ref:
+        description: CarbonHV commit or branch whose recipe to follow
+        default: main
+      kernel_version:
+        description: kernel.org stable version to build
+        default: "6.12.10"
+      size_mib:
+        description: Size of the rootfs ext4 image
+        default: "16384"
+      publish_tag:
+        description: Publish as a release with this tag (empty = artifact only)
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: itsrhotaudevvy/CarbonHV
+          ref: ${{ inputs.carbonhv_ref }}
+          path: carbonhv
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev \
+            cpio rsync xz-utils
+      - name: Build and contract-check the kernel
+        run: ci/kernel.sh "${{ inputs.kernel_version }}" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ut-kernel
+          path: out/
+          if-no-files-found: error
+
+  initramfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu cpio
+      - name: Build the CVD1 initramfs
+        run: ci/initramfs.sh out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ut-initramfs
+          path: out/
+          if-no-files-found: error
+
+  rootfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+      - name: Assemble the rootfs image from the pinned tarball
+        env:
+          UT_URL: ${{ vars.CARBONHV_UT_ROOTFS_URL }}
+          UT_SHA256: ${{ vars.CARBONHV_UT_ROOTFS_SHA256 }}
+        run: ci/rootfs.sh "$UT_URL" "$UT_SHA256" "${{ inputs.size_mib }}" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ut-rootfs
+          path: out/
+          if-no-files-found: error
+
+  assemble:
+    needs: [kernel, initramfs, rootfs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: itsrhotaudevvy/CarbonHV
+          ref: ${{ inputs.carbonhv_ref }}
+          path: carbonhv
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ut-kernel
+          path: in
+      - uses: actions/download-artifact@v4
+        with:
+          name: ut-initramfs
+          path: in
+      - uses: actions/download-artifact@v4
+        with:
+          name: ut-rootfs
+          path: in
+
+      - name: Install assembly tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs mtools xorriso
+
+      - name: Assemble with the CarbonHV recipe
+        env:
+          UT_ROOTFS_TARBALL: ${{ github.workspace }}/in/rootfs.tar
+          UT_ROOTFS_SHA256: ${{ vars.CARBONHV_UT_ROOTFS_SHA256 }}
+          UT_KERNEL_IMAGE: ${{ github.workspace }}/in/Image
+          UT_INITRD_IMAGE: ${{ github.workspace }}/in/cvd1-initramfs.cpio.gz
+          UT_KERNEL_CONFIG: ${{ github.workspace }}/in/kernel.config
+        run: |
+          set -euo pipefail
+          # build.sh consumes the tarball, not a prebuilt ext4: hand it the tarball that the rootfs
+          # job verified, and let it do the packaging it was written to do.
+          cargo build --release --manifest-path carbonhv/crates/carbon-cli/Cargo.toml
+          export CARBONCTL="$PWD/carbonhv/target/release/carbonctl"
+          echo "note: rootfs.img from the rootfs job is kept alongside as evidence of the tree" >&2
+          carbonhv/guest/ubuntu-touch/build.sh
+
+      - name: Write provenance
+        run: |
+          set -euo pipefail
+          out=out/carbonhv/ubuntu-touch
+          {
+            echo "built_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "carbonhv_commit=$(git -C carbonhv rev-parse HEAD)"
+            echo "kernel_version=${{ inputs.kernel_version }}"
+            echo "rootfs_sha256=${{ vars.CARBONHV_UT_ROOTFS_SHA256 }}"
+            echo "kernel=$(cat in/kernel.env 2>/dev/null | tr '\n' ' ')"
+            echo "identity=Ubuntu Touch (Lomiri) CVD1 port; not a desktop Ubuntu image"
+            echo "workflow_run=${{ github.run_id }}"
+          } >"$out/provenance.txt"
+          cat "$out/provenance.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: carbonhv-guest-ubuntu-touch-cvd1
+          path: out/carbonhv/ubuntu-touch/
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ inputs.publish_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.publish_tag }}"
+          gh release create "$tag" out/carbonhv/ubuntu-touch --title "$tag" \
+            --notes "Ubuntu Touch CVD1 guest assembled by CarbonHV CI; see provenance.txt." \
+            || gh release upload "$tag" out/carbonhv/ubuntu-touch --clobber
